@@ -25,7 +25,8 @@ const COMPOSIO_MCP_SERVER_ID = 'ee58124a-c702-4495-91cc-59db9526ba54'
 
 function getCanvaMcpUrl(userId = 'rookdigital-main') {
   if (!COMPOSIO_KEY) return null
-  return `https://backend.composio.dev/v3/mcp/${COMPOSIO_MCP_SERVER_ID}?user_id=${userId}`
+  // Try with connected_account_id first, then user_id
+  return `https://backend.composio.dev/v3/mcp/${COMPOSIO_MCP_SERVER_ID}?connected_account_id=ca_hPaT29c_enOE`
 }
 
 // ── Generate design with Claude + Canva MCP ─────────────────
