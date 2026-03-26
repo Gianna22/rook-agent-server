@@ -1,5 +1,5 @@
-// Rook Agent Server v4 — Claude Agent SDK + Canva MCP
-// Claude uses Canva MCP tools to generate professional designs
+// Rook Agent Server v5 — Claude + Canva via Composio MCP Connector
+// Claude calls Canva tools directly through Anthropic's MCP connector
 
 import Anthropic from '@anthropic-ai/sdk'
 import express from 'express'
@@ -12,89 +12,188 @@ app.use(express.json({ limit: '10mb' }))
 const PORT = process.env.PORT || 3000
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY
 const IDEOGRAM_KEY = process.env.IDEOGRAM_API_KEY
+const COMPOSIO_KEY = process.env.COMPOSIO_API_KEY
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_KEY })
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'rook-agent-server', version: '4.0.0' })
+  res.json({ status: 'ok', service: 'rook-agent-server', version: '5.0.0' })
 })
 
-// ── Generate design using Claude with Canva tools ──────────────
+// ── Get Composio MCP URL for Canva ──────────────────────────
+async function getCanvaMcpUrl() {
+  if (!COMPOSIO_KEY) return null
+  try {
+    const res = await fetch('https://backend.composio.dev/api/v1/mcp/sessions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': COMPOSIO_KEY,
+      },
+      body: JSON.stringify({
+        toolkits: ['canva'],
+        user_id: 'rookdigital-main',
+      }),
+    })
+    const data = await res.json()
+    console.log('[agent] Composio MCP session:', JSON.stringify(data).slice(0, 300))
+    return data?.mcp?.url || data?.url || null
+  } catch (e) {
+    console.warn('[agent] Composio session failed:', e.message)
+    return null
+  }
+}
+
+// ── Generate design with Claude + Canva MCP ─────────────────
 app.post('/generate-design', async (req, res) => {
   try {
-    const { title, caption, format, brandName, industry, colors, tone, visualStyle, mood, avoid, targetAudience, description, logoUrl, canvaToken } = req.body
+    const { title, caption, format, brandName, industry, colors, tone, visualStyle, mood, avoid, targetAudience, description, logoUrl } = req.body
     if (!title) return res.status(400).json({ error: 'Missing title' })
 
     const isStory = ['story', 'reel'].includes(format)
     const designType = isStory ? 'your_story' : 'instagram_post'
 
-    // If we have a Canva token, try to use Canva's design generation API
-    if (canvaToken) {
+    // Try Canva via Composio MCP
+    const mcpUrl = await getCanvaMcpUrl()
+
+    if (mcpUrl && ANTHROPIC_KEY) {
       try {
-        // Call Canva's design generation endpoint (used by MCP internally)
-        const genRes = await fetch('https://api.canva.com/rest/v1/design-generations', {
+        console.log('[agent] Using Canva via MCP connector:', mcpUrl.slice(0, 80))
+
+        const query = `Create a professional Instagram ${isStory ? 'story' : 'post'} design for "${brandName}" (${industry}).
+Title: "${title}"
+${caption ? `Caption: "${caption.slice(0, 100)}"` : ''}
+Brand colors: ${colors?.primary || '#000'} and ${colors?.secondary || '#333'}.
+Style: ${visualStyle || mood || 'professional modern'}.
+Tone: ${tone || 'professional'}.
+${avoid ? `Avoid: ${avoid}` : ''}
+The design should be professional, on-brand, and ready for Instagram.`
+
+        // Call Claude with MCP connector to Canva
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${canvaToken}`,
             'Content-Type': 'application/json',
+            'x-api-key': ANTHROPIC_KEY,
+            'anthropic-version': '2023-06-01',
+            'anthropic-beta': 'mcp-client-2025-11-20',
           },
           body: JSON.stringify({
-            query: `${title}. ${brandName} ${industry}. Brand colors: ${colors?.primary} and ${colors?.secondary}. ${visualStyle || mood || 'Professional'} style. ${tone || ''} tone.${caption ? ` Context: ${caption.slice(0, 100)}` : ''}`,
-            design_type: designType,
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 2000,
+            messages: [{
+              role: 'user',
+              content: `Generate a ${designType} design using Canva for this brand:
+${query}
+Use the generate-design tool to create this design.`
+            }],
+            mcp_servers: [{
+              type: 'url',
+              url: mcpUrl,
+              name: 'canva-mcp',
+              authorization_token: COMPOSIO_KEY,
+            }],
+            tools: [{
+              type: 'mcp_toolset',
+              mcp_server_name: 'canva-mcp',
+            }],
           }),
         })
 
-        if (genRes.ok) {
-          const genData = await genRes.json()
-          console.log('[agent] Canva generate response:', JSON.stringify(genData).slice(0, 300))
+        const data = await response.json()
+        console.log('[agent] Claude+MCP response:', JSON.stringify(data).slice(0, 500))
 
-          // Handle async job — poll for completion
-          if (genData.job?.id) {
-            let result = genData
-            for (let i = 0; i < 15; i++) {
-              if (result.job?.status === 'success' || result.job?.result) break
-              await new Promise(r => setTimeout(r, 2000))
-              const pollRes = await fetch(`https://api.canva.com/rest/v1/design-generations/${genData.job.id}`, {
-                headers: { 'Authorization': `Bearer ${canvaToken}` },
-              })
-              if (pollRes.ok) result = await pollRes.json()
-            }
+        if (response.ok) {
+          // Check if Claude used MCP tools and got results
+          const toolResults = data.content?.filter(c => c.type === 'mcp_tool_result') || []
+          const textBlocks = data.content?.filter(c => c.type === 'text') || []
 
-            const candidates = result.job?.result?.designs || result.job?.result?.generated_designs || []
-            if (candidates.length > 0) {
-              // Return the first candidate's thumbnail
-              const best = candidates[0]
+          // Look for design URLs in tool results
+          for (const result of toolResults) {
+            const resultText = result.content?.map(c => c.text).join('') || ''
+            const urlMatch = resultText.match(/https:\/\/[^\s"]+canva[^\s"]+/) || resultText.match(/https:\/\/[^\s"]+/)
+            if (urlMatch) {
               return res.json({
-                url: best.thumbnail?.url || best.urls?.view_url,
-                editUrl: best.urls?.edit_url,
-                designId: best.id,
-                candidates: candidates.map(c => ({
-                  id: c.id,
-                  thumbnail: c.thumbnail?.url,
-                  editUrl: c.urls?.edit_url,
-                })),
-                source: 'canva',
+                url: urlMatch[0],
+                source: 'canva-mcp',
+                rawResponse: resultText.slice(0, 500),
+              })
+            }
+            // Try parsing as JSON
+            try {
+              const parsed = JSON.parse(resultText)
+              if (parsed.url || parsed.thumbnail || parsed.editUrl) {
+                return res.json({
+                  url: parsed.thumbnail || parsed.url,
+                  editUrl: parsed.editUrl || parsed.edit_url,
+                  designId: parsed.designId || parsed.design_id,
+                  source: 'canva-mcp',
+                })
+              }
+            } catch {}
+          }
+
+          // Check if there are tool_use blocks (needs agentic loop)
+          const toolUseBlocks = data.content?.filter(c => c.type === 'mcp_tool_use') || []
+          if (toolUseBlocks.length > 0 && data.stop_reason === 'tool_use') {
+            // Need to continue the conversation with tool results
+            // The MCP connector handles this automatically on Anthropic's side
+            // but we may need multiple turns
+            console.log('[agent] Tool use detected, MCP connector handling...')
+
+            // Make a follow-up call to let Claude process the tool results
+            const followUp = await fetch('https://api.anthropic.com/v1/messages', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': ANTHROPIC_KEY,
+                'anthropic-version': '2023-06-01',
+                'anthropic-beta': 'mcp-client-2025-11-20',
+              },
+              body: JSON.stringify({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 2000,
+                messages: [
+                  { role: 'user', content: `Generate a ${designType} design using Canva for "${brandName}": "${title}". Use the generate-design tool.` },
+                  { role: 'assistant', content: data.content },
+                ],
+                mcp_servers: [{
+                  type: 'url',
+                  url: mcpUrl,
+                  name: 'canva-mcp',
+                  authorization_token: COMPOSIO_KEY,
+                }],
+                tools: [{
+                  type: 'mcp_toolset',
+                  mcp_server_name: 'canva-mcp',
+                }],
+              }),
+            })
+            const followUpData = await followUp.json()
+            console.log('[agent] Follow-up response:', JSON.stringify(followUpData).slice(0, 500))
+
+            // Extract any URLs from the follow-up
+            const allContent = JSON.stringify(followUpData.content || [])
+            const canvaUrl = allContent.match(/https:\/\/[^\s"\\]+canva[^\s"\\]+/)
+              || allContent.match(/"url"\s*:\s*"(https:\/\/[^"]+)"/)
+            if (canvaUrl) {
+              return res.json({
+                url: canvaUrl[1] || canvaUrl[0],
+                source: 'canva-mcp',
               })
             }
           }
 
-          // Direct response (non-async)
-          if (genData.designs?.length || genData.generated_designs?.length) {
-            const designs = genData.designs || genData.generated_designs
-            const best = designs[0]
-            return res.json({
-              url: best.thumbnail?.url || best.urls?.view_url,
-              editUrl: best.urls?.edit_url,
-              designId: best.id,
-              source: 'canva',
-            })
+          // Extract any text response
+          const textResponse = textBlocks.map(b => b.text).join('\n')
+          if (textResponse) {
+            console.log('[agent] Claude text response:', textResponse.slice(0, 200))
           }
-        } else {
-          const errData = await genRes.json().catch(() => ({}))
-          console.log('[agent] Canva generate failed:', genRes.status, JSON.stringify(errData).slice(0, 200))
         }
+
+        console.log('[agent] Canva MCP did not produce a design, falling back to Ideogram')
       } catch (e) {
-        console.warn('[agent] Canva generation error:', e.message)
+        console.warn('[agent] Canva MCP error:', e.message)
       }
     }
 
@@ -102,7 +201,6 @@ app.post('/generate-design', async (req, res) => {
     if (!IDEOGRAM_KEY) return res.status(500).json({ error: 'No image generation service available' })
 
     let prompt = `${title}. ${brandName} ${industry}. Professional design.`
-
     if (ANTHROPIC_KEY) {
       try {
         const response = await anthropic.messages.create({
@@ -111,24 +209,18 @@ app.post('/generate-design', async (req, res) => {
           messages: [{
             role: 'user',
             content: `Write an Ideogram AI prompt for a professional Instagram ${isStory ? 'story' : 'post'} design.
-
 BRAND: ${brandName} (${industry})
 TITLE: "${title}"
-${caption ? `CONTEXT: "${caption.slice(0, 100)}"` : ''}
 COLORS: ${colors?.primary}, ${colors?.secondary}
 STYLE: ${visualStyle || mood || 'professional'}
-TONE: ${tone || 'professional'}
-${avoid ? `AVOID: ${avoid}` : ''}
-
-Include brand name "${brandName}" and title "${title}" as text in the design.
-Use brand colors. Professional quality.
+Include brand name "${brandName}" and title "${title}" as text.
 Output ONLY the prompt, max 150 words.`
           }],
         })
         const p = response.content[0]?.text?.trim()
         if (p && p.length > 20) prompt = p
       } catch (e) {
-        console.warn('[agent] Claude failed:', e.message)
+        console.warn('[agent] Claude prompt failed:', e.message)
       }
     }
 
@@ -146,7 +238,6 @@ Output ONLY the prompt, max 150 words.`
     if (!url) throw new Error('No URL returned')
 
     return res.json({ url, prompt, source: 'ideogram' })
-
   } catch (e) {
     console.error('[agent] Error:', e.message)
     return res.status(500).json({ error: e.message })
@@ -178,5 +269,5 @@ app.post('/generate-photos', async (req, res) => {
 })
 
 app.listen(PORT, () => {
-  console.log(`Rook Agent Server v4 running on port ${PORT}`)
+  console.log(`Rook Agent Server v5 running on port ${PORT}`)
 })
