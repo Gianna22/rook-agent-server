@@ -20,28 +20,12 @@ app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'rook-agent-server', version: '5.0.0' })
 })
 
-// ── Get Composio MCP URL for Canva ──────────────────────────
-async function getCanvaMcpUrl() {
+// ── Composio MCP URL for Canva (pre-configured) ─────────────
+const COMPOSIO_MCP_SERVER_ID = 'ee58124a-c702-4495-91cc-59db9526ba54'
+
+function getCanvaMcpUrl(userId = 'rookdigital-main') {
   if (!COMPOSIO_KEY) return null
-  try {
-    const res = await fetch('https://backend.composio.dev/api/v1/mcp/sessions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': COMPOSIO_KEY,
-      },
-      body: JSON.stringify({
-        toolkits: ['canva'],
-        user_id: 'rookdigital-main',
-      }),
-    })
-    const data = await res.json()
-    console.log('[agent] Composio MCP session:', JSON.stringify(data).slice(0, 300))
-    return data?.mcp?.url || data?.url || null
-  } catch (e) {
-    console.warn('[agent] Composio session failed:', e.message)
-    return null
-  }
+  return `https://backend.composio.dev/v3/mcp/${COMPOSIO_MCP_SERVER_ID}?user_id=${userId}`
 }
 
 // ── Generate design with Claude + Canva MCP ─────────────────
@@ -91,7 +75,7 @@ Use the generate-design tool to create this design.`
               type: 'url',
               url: mcpUrl,
               name: 'canva-mcp',
-              authorization_token: COMPOSIO_KEY,
+              authorization_token: `Bearer ${COMPOSIO_KEY}`,
             }],
             tools: [{
               type: 'mcp_toolset',
@@ -161,7 +145,7 @@ Use the generate-design tool to create this design.`
                   type: 'url',
                   url: mcpUrl,
                   name: 'canva-mcp',
-                  authorization_token: COMPOSIO_KEY,
+                  authorization_token: `Bearer ${COMPOSIO_KEY}`,
                 }],
                 tools: [{
                   type: 'mcp_toolset',
